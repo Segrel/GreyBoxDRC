@@ -1,8 +1,9 @@
 import argparse
 import os
 import glob
-import soundfile as sf
 import numpy as np
+import torchaudio
+import torch
 
 prsr = argparse.ArgumentParser(
     description='''This script does preprocessing to assemble a sub-dataset from the SignalTrain dataset directory''')
@@ -41,8 +42,10 @@ if __name__ == "__main__":
                 target_name = name
                 input_name = 'input' + target_name[6:10] + '_.wav'
 
-                tgt, fs_t = sf.read(filename)
-                inp, fs_i = sf.read(os.path.join(init_path, input_name))
+                tgt, fs_t = torchaudio.load(filename)
+                tgt = tgt[0].numpy()
+                inp, fs_i = torchaudio.load(os.path.join(init_path, input_name))
+                inp = inp[0].numpy()
 
                 assert fs_i == fs_t
                 assert tgt.shape == inp.shape
@@ -77,12 +80,12 @@ if __name__ == "__main__":
                 assert(len(val_tadata) == len(val_indata))
                 assert(len(test_tadata) == len(test_indata))
 
-                sf.write(os.path.join(train_dir, input_name), train_indata, fs_i)
-                sf.write(os.path.join(train_dir, target_name), train_tadata, fs_i)
+                torchaudio.save(os.path.join(train_dir, input_name), torch.tensor([train_indata], dtype=torch.float), fs_i)
+                torchaudio.save(os.path.join(train_dir, target_name), torch.tensor([train_tadata], dtype=torch.float), fs_i)
 
-                sf.write(os.path.join(val_dir, input_name), val_indata, fs_i)
-                sf.write(os.path.join(val_dir, target_name), val_tadata, fs_i)
+                torchaudio.save(os.path.join(val_dir, input_name), torch.tensor([val_indata], dtype=torch.float), fs_i)
+                torchaudio.save(os.path.join(val_dir, target_name), torch.tensor([val_tadata], dtype=torch.float), fs_i)
 
-                sf.write(os.path.join(test_dir, input_name), test_indata, fs_i)
-                sf.write(os.path.join(test_dir, target_name), test_tadata, fs_i)
+                torchaudio.save(os.path.join(test_dir, input_name), torch.tensor([test_indata], dtype=torch.float), fs_i)
+                torchaudio.save(os.path.join(test_dir, target_name), torch.tensor([test_tadata], dtype=torch.float), fs_i)
 

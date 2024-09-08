@@ -23,6 +23,8 @@ class GainSmooth(pl.LightningModule):
         if self.smooth_type == 'TimeVaryOP':
             self.model = TimeVaryOP(**self.params)
             self.tvop = True
+        if self.smooth_type == 'FixedOnePole':
+            self.model = FixedOnePole(**self.params)
 
     def forward(self, gains, cond=None):
         gains = self.scale_inputs(gains)
@@ -32,7 +34,7 @@ class GainSmooth(pl.LightningModule):
 
     def verbose_forward(self, gains, cond=None):
         gains = self.scale_inputs(gains)
-        gains, taus = self.model.v_forward(gains, cond) if self.model.cond else self.model.v_forward(gains)
+        gains, taus = self.model.verbose_forward(gains, cond) if self.model.cond else self.model.verbose_forward(gains)
         gains = self.scale_outputs(gains)
         return gains, taus
 
@@ -143,6 +145,8 @@ class OnePoleAttOnly(pl.LightningModule):
         output = output[:, -inp.shape[1]:, :]
         return torch.mean(output, dim=2, keepdim=True)
 
+    def export(self, header_path: str, source_path: str, class_name: str):
+        print("OnePoleAttOnly tau is", self.taus.detach().clone().cpu().numpy().flatten())
 
 # One pole with independent attack and release times, can't be implemented in parallel
 class OnePoleAttRel(pl.LightningModule):
@@ -173,10 +177,12 @@ class OnePoleAttRel(pl.LightningModule):
     def reset_state(self, batch_size):
         self.iir_state = torch.zeros((batch_size, 1, 1), device=self.device)
 
+    def export(self, header_path: str, source_path: str, class_name: str):
+        print("OnePoleAttRel taus are", torch.sigmoid(self.taus).detach().clone().cpu().numpy().flatten())
 
 # One pole with time-varying parameter
 class TimeVaryOP(pl.LightningModule):
-    def __init__(self, hidden_size, rec):
+    def __init__(self, hidden_size, rec, cond=False):
         super(TimeVaryOP, self).__init__()
 
         if rec == 'gru':
@@ -185,9 +191,10 @@ class TimeVaryOP(pl.LightningModule):
             self.rec = nn.RNN(input_size=1, hidden_size=hidden_size, batch_first=True)
 
         self.lin = nn.Linear(in_features=hidden_size, out_features=1)
+        self.hidden_size = hidden_size
         self.iir_state = None
         self.state = None
-        self.cond = False
+        self.cond = cond
 
     def forward(self, g):
         # Time-varying time constant predicted by recurrent unit
@@ -228,3 +235,73 @@ class TimeVaryOP(pl.LightningModule):
     def detach_state(self):
         self.iir_state = self.iir_state.clone().detach()
         self.state = self.state.detach()
+
+    def export(self, header_path: str, source_path: str, class_name: str):
+        with open(header_path, 'w') as header_file:
+            header_file.write(f'#pragma once\n\n')
+            header_file.write(f'#include "GainSmoothParameters.h"\n\n')
+            header_file.write(f'struct {class_name}\n')
+            header_file.write('{\n')
+            header_file.write(f'    {class_name}();\n\n')
+            header_file.write(f'    static const size_t INPUT_SIZE = 1 ;\n')
+            header_file.write(f'    static const size_t OUTPUT_SIZE = 1 ;\n')
+            header_file.write(f'    static const size_t HIDDEN_SIZE = {self.hidden_size} ;\n')
+            header_file.write(f'    GainSmoothParameters<INPUT_SIZE, OUTPUT_SIZE, HIDDEN_SIZE> params;\n')
+            header_file.write('};\n')
+        # write source file
+        with open(source_path, "w") as source_file:
+            source_file.write(f'#include "{header_path}"\n\n')
+            source_file.write(f'{class_name}::{class_name}() : params ')
+            source_file.write('{\n')
+
+            weight_ih = self.rec.weight_ih_l0.detach().clone().cpu().numpy().flatten()
+            bias_ih = self.rec.bias_ih_l0.detach().clone().cpu().numpy().flatten()
+
+            weight_hh = self.rec.weight_hh_l0.detach().clone().cpu().numpy().flatten()
+            bias_hh = self.rec.bias_hh_l0.detach().clone().cpu().numpy().flatten()
+
+            weight_output = self.lin.weight.detach().clone().cpu().numpy().flatten()
+            bias_output = self.lin.bias.detach().clone().cpu().numpy().flatten()
+            
+            all_params = [weight_ih, bias_ih, weight_hh, bias_hh, weight_output, bias_output]
+
+            for i, param in enumerate(all_params):
+                source_file.write('{\n')
+                for j, value in enumerate(param):
+                    source_file.write('{:.15e}'.format(value))
+                    if j < len(param) - 1:
+                        source_file.write(',')
+                    source_file.write('\n')
+                if i < len(all_params) - 1:
+                    source_file.write('},\n')
+                else:
+                    source_file.write('}\n')
+            source_file.write('} {}')
+
+# One pole with fixed attack and release
+class FixedOnePole(pl.LightningModule):
+    def __init__(self, trunc_steps=None, cond=False):
+        super(FixedOnePole, self).__init__()
+        self.cond = cond
+        self.iir_state = None
+        self.att_alph = math.exp(-1 / (0.00803384 * 44100))
+        self.rel_alph = math.exp(-1 / (0.06893817 * 44100))
+
+    def forward(self, x, cond=None):
+        gs = torch.zeros_like(x)
+        for n in range(x.shape[1]):
+            gc = x[:, n:n+1, :]
+            self.iir_state = torch.where(self.iir_state > gc,
+                                        self.att_alph * self.iir_state + (1 - self.att_alph) * gc,
+                                        self.rel_alph * self.iir_state + (1 - self.rel_alph) * gc)
+            gs[:, n:n+1, 0:1] = self.iir_state
+        return gs
+
+    def detach_state(self):
+        self.iir_state = self.iir_state.clone().detach()
+
+    def reset_state(self, batch_size):
+        self.iir_state = torch.zeros((batch_size, 1, 1), device=self.device)
+
+    def export(self, header_path: str, source_path: str, class_name: str):
+        print("FixedOnePole has nothing to export")

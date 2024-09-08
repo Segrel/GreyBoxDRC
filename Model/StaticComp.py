@@ -1,6 +1,8 @@
+import os
 import torch
 import torch.nn as nn
 import pytorch_lightning as pl
+import numpy as np
 
 
 class StaticComp(pl.LightningModule):
@@ -38,17 +40,68 @@ class StaticComp(pl.LightningModule):
         x_ret += static_in
         return static_in, x_ret.squeeze()
 
+    def export(self, out_dir: str, class_name: str, sub_class_name: str):
+        with open(os.path.join(out_dir, sub_class_name + ".h"), 'w') as header_file:
+            header_file.write(f'#pragma once\n\n')
+            header_file.write(f'#include "{class_name}.h"\n\n')
+            header_file.write(f'struct {sub_class_name}\n')
+            header_file.write('{\n')
+            header_file.write(f'    {sub_class_name}();\n\n')
+            header_file.write(f'    static const size_t INPUT_SIZE = {self.model.cond_size} ;\n')
+            header_file.write(f'    static const size_t OUTPUT_SIZE = {self.model.out_features} ;\n')
+            header_file.write(f'    static const size_t HIDDEN_SIZE = {self.model.hidden_size} ;\n')
+            header_file.write(f'    static const size_t NUM_LAYERS = 4 ;\n')
+            header_file.write('\n')
+            header_file.write(f'    {class_name}<INPUT_SIZE, OUTPUT_SIZE, HIDDEN_SIZE, NUM_LAYERS> params;\n')
+            header_file.write('};\n')
+        # write source file
+        with open(os.path.join(out_dir, sub_class_name + ".cpp"), "w") as source_file:
+            source_file.write(f'#include "{sub_class_name}.h"\n\n')
+            source_file.write(f'{sub_class_name}::{sub_class_name}() : params ')
+            source_file.write('{\n')
+
+            weight_ih = self.model.HCNet[0].weight.detach().clone().cpu().numpy().flatten()
+            bias_ih = self.model.HCNet[0].bias.detach().clone().cpu().numpy().flatten()
+
+            weight_hh1 = self.model.HCNet[1].weight.detach().clone().cpu().numpy().flatten()
+            bias_hh1 = self.model.HCNet[1].bias.detach().clone().cpu().numpy().flatten()
+
+            weight_hh2 = self.model.HCNet[3].weight.detach().clone().cpu().numpy().flatten()
+            bias_hh2 = self.model.HCNet[3].bias.detach().clone().cpu().numpy().flatten()
+
+            weight_output = self.model.HCNet[5].weight.detach().clone().cpu().numpy().flatten()
+            bias_output = self.model.HCNet[5].bias.detach().clone().cpu().numpy().flatten()
+            
+            all_params = [weight_ih, bias_ih, np.append(weight_hh1, weight_hh2), np.append(bias_hh1, bias_hh2), weight_output, bias_output]
+
+            for i, param in enumerate(all_params):
+                source_file.write('{\n')
+                for j, value in enumerate(param):
+                    source_file.write('{:.15e}'.format(value))
+                    if j < len(param) - 1:
+                        source_file.write(',')
+                    source_file.write('\n')
+                if i < len(all_params) - 1:
+                    source_file.write('},\n')
+                else:
+                    source_file.write('}\n')
+            source_file.write('} {}')
+
 # A simple two parameter static-compression curve generator
 class SimpleHardKnee(pl.LightningModule):
     def __init__(self, cond_size=1, HC_hidden=20, min_db=-80):
         super(SimpleHardKnee, self).__init__()
-
+        self.cond_size = cond_size
+        self.hidden_size = HC_hidden
+        self.out_features = 2
         self.HCNet = nn.Sequential(
             nn.Linear(in_features=cond_size, out_features=HC_hidden),
-            nn.Tanh(),
             nn.Linear(in_features=HC_hidden, out_features=HC_hidden),
-            nn.Tanh(),
-            nn.Linear(in_features=HC_hidden, out_features=2))
+            nn.ReLU(),
+            nn.Linear(in_features=HC_hidden, out_features=HC_hidden),
+            nn.ReLU(),
+            nn.Linear(in_features=HC_hidden, out_features=self.out_features)
+        )
 
         self.min_db = min_db
 
@@ -84,12 +137,16 @@ class SimpleHardKnee(pl.LightningModule):
 class SimpleSoftKnee(pl.LightningModule):
     def __init__(self, cond_size=1, HC_hidden=20,  log_dom=True, min_db=-80):
         super(SimpleSoftKnee, self).__init__()
+        self.cond_size = cond_size
+        self.hidden_size = HC_hidden
+        self.out_features = 3
         self.HCNet = nn.Sequential(
             nn.Linear(in_features=cond_size, out_features=HC_hidden),
-            nn.Tanh(),
             nn.Linear(in_features=HC_hidden, out_features=HC_hidden),
-            nn.Tanh(),
-            nn.Linear(in_features=HC_hidden, out_features=3)
+            nn.ReLU(),
+            nn.Linear(in_features=HC_hidden, out_features=HC_hidden),
+            nn.ReLU(),
+            nn.Linear(in_features=HC_hidden, out_features=self.out_features)
         )
         self.log_dom = log_dom
         self.min_db = min_db

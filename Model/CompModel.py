@@ -43,6 +43,9 @@ class CompModel(pl.LightningModule):
         self.loss_fn = self.loss_functions[self.lf]
         self.loss_functions.pop(self.lf)
 
+        # Disable automatic optimization, we want to do TBPTT in our training step
+        self.automatic_optimization = False
+
     def configure_optimizers(self, l_rate=0.005):
         return torch.optim.Adam(self.parameters(), lr=self.l_rate)
 
@@ -73,7 +76,7 @@ class CompModel(pl.LightningModule):
     # time-varying one-pole filter is used
     def tvop_verbose_forward(self, x, hiddens, cond1=None, cond2=None):
         gc = self.static_comp(x, cond1)
-        gs, taus = self.gain_smooth.tvop_verbose_forward(gc, cond2)
+        gs, taus = self.gain_smooth.verbose_forward(gc, cond2)
         x_comp = torch.mul(x, 10**(gs/20))
         x_mkup = self.make_up(x_comp)
         return x_mkup, gs, taus
@@ -90,25 +93,25 @@ class CompModel(pl.LightningModule):
     def tbptt_split_batch(self, batch, split_size):
         return ConditionedDataLoader.tbptt_split_batch(batch, self.warmup, split_size)
 
-    def training_step(self, batch, batch_idx, hiddens=None):
-        warmup_step = hiddens is None
-        x, y, conds = batch
-
-        if warmup_step:
-            # construct dummy loss so that the warmup step does not update parameters
-            self.reset_states(batch[0].shape[0])
-            loss = torch.zeros(1, device=self.device, requires_grad=True)
-            x, y, conds = batch
-        else:
-            self.detach_states()
-
-        y_hat, hiddens = self(x, hiddens, conds)
-
-        if not warmup_step:
-            # in all other steps, calculate actual loss and backpropagate
-            loss = self.loss_fn(y_hat, y)
-            self.log("train_loss_" + self.lf, loss, on_step=True, on_epoch=True)
-        return {"loss": loss, "hiddens": hiddens}
+    def training_step(self, batch, batch_idx):
+        optimizer = self.optimizers()
+        split_batches = self.tbptt_split_batch(batch, self.truncated_bptt_steps)
+        # Skip updating parameters on first (warmup) batch
+        skipOptimization = True
+        for split_batch in enumerate(split_batches):
+            x, y, conds = split_batch[1]
+            if skipOptimization == True:
+                self.reset_states(x.shape[0])
+                y_hat = self(x, [], conds)
+                skipOptimization = False
+            else:
+                self.detach_states()
+                y_hat, gs = self(x, [], conds)
+                loss = self.loss_fn(y_hat, y)
+                self.log("train_loss_" + self.lf, loss, on_step=True, on_epoch=True)
+                self.backward(loss)
+                optimizer.step()
+                optimizer.zero_grad()
 
     # Validation step processes each conditioning value in turn, so first step will include all data for PR=0, second
     # for all data for PR=10, etc
@@ -133,7 +136,7 @@ class CompModel(pl.LightningModule):
                 # if time-vary one-pole is used, use function that returns the time-vary one-pole par for plotting
                 if self.gain_smooth.tvop:
                     y_hat[:, st_ch:en_ch, :], gs[:, st_ch:en_ch, :], taus[:, st_ch:en_ch, :] = \
-                        self.gain_smooth.tvop_verbose_forward(x[:, st_ch:en_ch, :], None, conds)
+                        self.tvop_verbose_forward(x[:, st_ch:en_ch, :], None, conds)
                 else:
                     y_hat[:, st_ch:en_ch, :], gs[:, st_ch:en_ch, :] = self(x[:, st_ch:en_ch, :], None, conds)
 

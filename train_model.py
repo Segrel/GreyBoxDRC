@@ -28,8 +28,6 @@ if __name__ == "__main__":
     # If a load_config argument was provided, construct the file path to the config file
     args = model_configs.main(int(args.model_config))
 
-    gpus = 1 if torch.cuda.is_available() else 0
-
     # Create and set up dataloader
     data = ConditionedDataLoader.AudioDataModule(batch_size=30, batch_size_v=24,
                                                  device_name=args['data_set'], data_dir=args.pop('data_dir'))
@@ -50,7 +48,7 @@ if __name__ == "__main__":
 
     # Create trainer object
     trainer = pl.Trainer(max_epochs=50, val_check_interval=0.25,
-                         callbacks=[early_stopping, checkpoint_callback], logger=logger, gpus=gpus,
+                         callbacks=[early_stopping, checkpoint_callback], logger=logger,
                          num_sanity_val_steps=0)
     # Train model
     trainer.fit(model, train_dataloaders=train_dataloader, val_dataloaders=val_dataloader)

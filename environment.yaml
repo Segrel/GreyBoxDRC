@@ -3,8 +3,8 @@ channels:
   - pytorch
   - conda-forge
 dependencies:
-  - cudnn
-  - cudatoolkit
+  - tensorflow
+  - tensorboard
   - pytorch
   - torchaudio
   - pytorch-lightning
